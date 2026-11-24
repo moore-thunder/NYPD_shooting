@@ -1,0 +1,182 @@
+---
+title: "NYPD Shooting Data"
+author: "Justin Vaughn"
+date: "2026-11-11"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# This is going to be an R Markdown document about NYPD Historic Shootings.
+
+The URL for this data is as follows https://data.cityofnewyork.us/api/v3/views/833y-fsy8/export.csv?accessType=DOWNLOAD This URL allows for the direct download of the data set. Here I will set the data. Using this data, I would like to see if there are statistically significant increases in shootings at night time versus during the day time, and if yes, are certain boroughs more prone to shootings.
+
+```{r, echo = TRUE}
+url <- "https://data.cityofnewyork.us/api/v3/views/833y-fsy8/export.csv?accessType=DOWNLOAD"
+```
+
+In the next code chunk, I will be reading in the data directly from the URL, as well as importing my tidyverse, my ggplot2 package, and a package that I will need in order to correct any date/times that may be incorrectly classified.
+
+```{r, echo = TRUE}
+library(tidyverse)
+library(ggplot2)
+library(lubridate)
+library(hms)
+
+data <- read_csv(url)
+
+data
+```
+
+## What does the data tell us?
+
+Upon initial load of the data, we have 21 distinct columns with approximately 30,000 rows of data. There are certain columns that will be pertinent to our analysis, and others that we may not need. Additionally, the ‘date’ column is not in the proper format for a date time so we will need to correct that as well. Using the below code. We can consolidate the location specific details, create a new subset of the data containing only the columns we need, and we can update our OCCUR_DATE column to be accurately captured as a date column.
+
+```{r, echo = TRUE}
+ data2 <- data %>% 
+    pivot_longer(
+         cols = c(LOC_OF_OCCUR_DESC, LOC_CLASSFCTN_DESC, LOCATION_DESC), 
+         names_to = "Location_Details", 
+         values_to = "Specifics"
+     )
+data2 <- data2 %>% select(OCCUR_DATE, OCCUR_TIME, BORO, Location_Details, Specifics)
+data2 <- data2 %>% mutate(OCCUR_DATE = mdy(OCCUR_DATE))
+data2 
+```
+
+Now that our data is pared down and is in a usable format, I want to split by data set into a night time data set, and a day time data set. For the purpose of equality night time and day time will be comprised of 12 hours each. Day time will be 7:00AM - 6:59PM (07:00 - 18:59) and night time will be 7:00PM - 06:59AM (19:00 - 06:59)
+
+```{r, echo = TRUE}
+daytime_data <- data2 %>% filter(OCCUR_TIME >= hms::as.hms("07:00:00") & OCCUR_TIME <= hms::as.hms("18:59:00"))
+
+nighttime_data <- data2 %>% filter(OCCUR_TIME >= hms::as_hms("19:00:00") | OCCUR_TIME <= hms::as_hms("6:59:00"))
+```
+
+## Plotting the data for Analysis
+Now that we have our two core data sets, it is time to visualize the data, and see if we can glean additional questions to ask for further analysis.
+
+```{r, echo = TRUE}
+nighttime_data %>% 
+    group_by(OCCUR_DATE, BORO) %>%
+    summarise(total_incidents = n(), .groups = "drop") %>%
+    ggplot(aes(x = OCCUR_DATE, y = total_incidents, color = BORO, group = BORO)) +
+    geom_line() +
+    geom_point() +
+    labs(
+        x = "Date of Incident",
+        y = "Number of incidents",
+        title = "Number of Incidents in Each Borough Over Time at Night"
+    )
+
+
+daytime_data %>% 
+    group_by(OCCUR_DATE, BORO) %>%
+    summarise(total_incidents = n(), .groups = "drop") %>%
+    ggplot(aes(x = OCCUR_DATE, y = total_incidents, color = BORO, group = BORO)) +
+    geom_line() +
+    geom_point() +
+    labs(
+        x = "Date of Incident",
+        y = "Number of incidents",
+        title = "Number of Incidents in Each Borough during the day"
+    )
+```
+
+## Analysis From Visualization
+In comparing the two graphs, we find two trends that we should examine a little more. The first being that almost overwhelmingly, more shootings occur at night as opposed to during the day. The second, and potentially more interesting idea to review is that The Bronx Borough has outliers during both the night time and day time. Below is a visualization of just the Bronx data
+
+```{r, echo = TRUE}
+nighttime_data %>% 
+    group_by(OCCUR_DATE, BORO) %>%
+    filter(BORO == "BRONX") %>%
+    summarise(total_incidents = n(), .groups = "drop") %>%
+    ggplot(aes(x = OCCUR_DATE, y = total_incidents, color = BORO, group = BORO)) +
+    geom_line() +
+    geom_point() +
+    labs(
+        x = "Date of Incident",
+        y = "Number of incidents",
+        title = "Number of Incidents in the Bronx at night"
+    )
+
+daytime_data %>% 
+    group_by(OCCUR_DATE, BORO) %>%
+    filter(BORO == "BRONX") %>%
+    summarise(total_incidents = n(), .groups = "drop") %>%
+    ggplot(aes(x = OCCUR_DATE, y = total_incidents, color = BORO, group = BORO)) +
+    geom_line() +
+    geom_point() +
+    labs(
+        x = "Date of Incident",
+        y = "Number of incidents",
+        title = "Number of Incidents in the Bronx during the day"
+    )
+```
+
+## Modeling the Data
+We are able to see visually, what looks to be, a correlated effect. However, count-based data can be prone to overdispersion. This means that standard linear models do not fit well when modelling this type of data. To combat this, we will use a negative binomial regression which adequately accounts for this overdispersion of data. We will start by combining the nighttime and daytime data back together while adding a column to account for whether this data is day time or night time. Then we will library in the appropriate package to complete our model, then we will clean out data set to allow for the model to be fit.
+
+```{r, echo = TRUE}
+daytime_data <- data2 %>% filter(OCCUR_TIME >= hms::as.hms("07:00:00") & OCCUR_TIME <= hms::as.hms("18:59:00")) %>% mutate(time_period = "Day")
+nighttime_data <- data2 %>% filter(OCCUR_TIME >= hms::as_hms("19:00:00") | OCCUR_TIME <= hms::as_hms("6:59:00")) %>% mutate(time_period = "Night")
+
+recombined <- bind_rows(daytime_data, nighttime_data)
+
+aggregated_data <- recombined %>%
+    group_by(OCCUR_DATE, BORO, time_period) %>%
+    summarise(total_incidents = n(), .groups = "drop") %>%
+    complete(
+        OCCUR_DATE = seq.Date(min(OCCUR_DATE, na.rm = TRUE), max(OCCUR_DATE, na.rm = TRUE), by = "day"),
+        BORO,
+        time_period,
+        fill = list(total_incidents = 0)
+    ) %>%
+    mutate(
+        year = factor(lubridate::year(OCCUR_DATE)),
+        day_of_week = lubridate::wday(OCCUR_DATE, label = TRUE)
+    )
+library(MASS)
+
+nbm <- glm.nb(
+    total_incidents ~ BORO * time_period + year + day_of_week,
+    data = aggregated_data
+)
+
+pred_grid <- expand.grid(
+    BORO = unique(aggregated_data$BORO),
+    time_period = c("Day", "Night"),
+    year = tail(levels(aggregated_data$year), 1),
+    day_of_week = "Wed"
+)
+predictions <- predict(nbm, newdata = pred_grid, type = "link", se.fit = TRUE)
+
+pred_grid <- pred_grid %>%
+    mutate(
+        predicted_incidents = exp(predictions$fit),
+        lower_interval = exp(predictions$fit - 1.96 * predictions$se.fit),
+        upper_interval = exp(predictions$fit + 1.96 * predictions$se.fit)
+    )
+
+pred_grid %>% ggplot(aes(x = reorder(BORO, predicted_incidents), y = predicted_incidents, fill = time_period)) +
+geom_col(position = position_dodge(0.8), width = 0.7, alpha = 0.85) +
+geom_errorbar(
+        aes(ymin = lower_interval, ymax = upper_interval), 
+        position = position_dodge(0.8), 
+        width = 0.25, 
+        color = "black"
+    ) +
+    labs(
+        x = "Borough",
+        y = "Predicted Daily Incidents",
+        fill = "Time Period",
+        title = "Predicted Shooting Incidents by Borough and Time of Day",
+        subtitle = "Based on Negative Binomial Model Estimates"
+    ) 
+```
+
+## Possible Bias Considerations
+While we have concluded that there is a statistical significance in both the time of day, as well as the Borough that you reside in that play a part in whether there are any shooting incidents, there are certain criteria that are unaccounted for in this process. The first is that the data assumes the data is uniformly collected across all 5 Boroughs with the same level scrutiny to collect each record. Additionally, we assume that the data collected is not inflated or intentionally misled in some way or another. While we can assume this is not the case, since we are not the proprietors of the data we cannot be certain.
